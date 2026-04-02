@@ -9,6 +9,7 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.cluster import DBSCAN
 from PIL import Image
 from ultralytics import YOLO
+import reverse_geocoder as rg
 
 # --- 1. PAGE CONFIGURATION ---
 st.set_page_config(
@@ -53,26 +54,46 @@ def train_raman_model(df):
 
 @st.cache_data
 def generate_hotspot_map():
-    """Combine global datasets and cluster hotspots using DBSCAN."""
+    """Combine global datasets and cluster hotspots using DBSCAN with country info."""
     try:
         df_adv = pd.read_csv('ADVENTURE_MICRO_FROM_SCIENTIST.csv')
         df_geo = pd.read_csv('GEOMARINE_MICRO.csv')
         df_sea = pd.read_csv('SEA_MICRO.csv')
         
-        df_adv_clean = df_adv[df_adv['Total_Pieces_L'] > 0][['Latitude', 'Longitude']]
-        df_geo_clean = df_geo[df_geo['MP_conc__particles_cubic_metre_'] > 0][['Latitude', 'Longitude']]
-        df_sea_clean = df_sea[df_sea['Pieces_KM2'] > 0][['Latitude', 'Longitude']]
+        df_adv_clean = df_adv[df_adv['Total_Pieces_L'] > 0][['Latitude', 'Longitude']].copy()
+        df_adv_clean['source'] = 'ADVENTURE'
+        df_adv_clean['value'] = df_adv[df_adv['Total_Pieces_L'] > 0]['Total_Pieces_L'].values
         
-        df_all = pd.concat([df_adv_clean, df_geo_clean, df_sea_clean]).dropna()
+        df_geo_clean = df_geo[df_geo['MP_conc__particles_cubic_metre_'] > 0][['Latitude', 'Longitude']].copy()
+        df_geo_clean['source'] = 'GEOMARINE'
+        df_geo_clean['value'] = df_geo[df_geo['MP_conc__particles_cubic_metre_'] > 0]['MP_conc__particles_cubic_metre_'].values
+        
+        df_sea_clean = df_sea[df_sea['Pieces_KM2'] > 0][['Latitude', 'Longitude']].copy()
+        df_sea_clean['source'] = 'SEAMICROPLASTICS'
+        df_sea_clean['value'] = df_sea[df_sea['Pieces_KM2'] > 0]['Pieces_KM2'].values
+        
+        df_all = pd.concat([df_adv_clean, df_geo_clean, df_sea_clean]).dropna().reset_index(drop=True)
+        
+        # Add country information via reverse geocoding (in batches for efficiency)
+        coordinates = df_all[['Latitude', 'Longitude']].values
+        try:
+            results = rg.search(coordinates)
+            countries = [result[1] for result in results]  # Extract country name (index 1)
+            df_all['Country'] = countries
+        except Exception as e:
+            df_all['Country'] = 'Unknown'
+            st.warning(f"Geocoding partial error (may timeout on large datasets): {e}")
         
         # Clustering for hotspot logic
         coords = np.radians(df_all[['Latitude', 'Longitude']])
         db = DBSCAN(eps=500/6371.0, min_samples=20, algorithm='ball_tree', metric='haversine').fit(coords)
         df_all['Cluster'] = db.labels_
+        
         return df_all
     except Exception as e:
         st.error(f"Mapping error: {e}")
-        return pd.DataFrame(columns=['Latitude', 'Longitude'])
+        return pd.DataFrame(columns=['Latitude', 'Longitude', 'Country'])
+
 
 # Pre-load shared assets
 raman_df = load_and_clean_raman()
@@ -176,13 +197,71 @@ elif page == "🧪 Chemical Analysis (Raman)":
 
 elif page == "🌍 Global Tracking (Map)":
     st.title("Global Pollution Hotspots")
-    st.write("Displaying aggregated density data from global marine research.")
+    st.write("Displaying aggregated density data from global marine research. Filter by your country to view regional data.")
     
     with st.spinner("Loading geospatial clusters..."):
         map_data = generate_hotspot_map()
+        
         if not map_data.empty:
-            map_display = map_data[['Latitude', 'Longitude']].rename(columns={'Latitude': 'lat', 'Longitude': 'lon'})
-            st.map(map_display, color='#ff4b4b', size=20)
-            st.caption("Red markers indicate confirmed microplastic sightings across major global water bodies.")
+            # Get available countries
+            available_countries = sorted(map_data['Country'].unique().tolist())
+            
+            # Sidebar country selector
+            with st.sidebar:
+                st.markdown("---")
+                st.subheader("🗺️ Country Filter")
+                selected_country = st.selectbox(
+                    "Select your country",
+                    options=["🌐 Global View"] + available_countries,
+                    key="country_select"
+                )
+            
+            # Filter data based on selection
+            if selected_country == "🌐 Global View":
+                filtered_data = map_data
+                display_title = "Global Hotspots"
+            else:
+                filtered_data = map_data[map_data['Country'] == selected_country]
+                display_title = f"Microplastic Data in {selected_country}"
+            
+            # Display statistics
+            if not filtered_data.empty:
+                st.subheader(display_title)
+                
+                col1, col2, col3, col4 = st.columns(4)
+                col1.metric("🔍 Sightings", len(filtered_data))
+                col2.metric("📍 Clusters", int(filtered_data['Cluster'].max() + 1) if filtered_data['Cluster'].max() >= 0 else 0)
+                col3.metric("📊 Avg Value", f"{filtered_data['value'].mean():.2f}")
+                col4.metric("🎯 Data Sources", filtered_data['source'].nunique())
+                
+                # Display map
+                st.divider()
+                st.subheader("Map View")
+                map_display = filtered_data[['Latitude', 'Longitude']].rename(
+                    columns={'Latitude': 'lat', 'Longitude': 'lon'}
+                )
+                st.map(map_display, color='#ff4b4b', size=20)
+                
+                # Display detailed statistics by source
+                st.divider()
+                st.subheader("Breakdown by Data Source")
+                source_stats = filtered_data.groupby('source').agg({
+                    'Latitude': 'count',
+                    'value': ['mean', 'max', 'sum']
+                }).round(2)
+                source_stats.columns = ['Sightings', 'Avg Concentration', 'Max Concentration', 'Total Value']
+                st.dataframe(source_stats, use_container_width=True)
+                
+                # Download filtered data option
+                st.divider()
+                csv = filtered_data.to_csv(index=False)
+                st.download_button(
+                    label="📥 Download Data as CSV",
+                    data=csv,
+                    file_name=f"microplastics_{selected_country.replace('🌐 ', '').replace(' ', '_')}.csv",
+                    mime="text/csv"
+                )
+            else:
+                st.info(f"No microplastic data available for {selected_country}. Try selecting another country.")
         else:
             st.warning("No geospatial data available. Check CSV file paths.")
