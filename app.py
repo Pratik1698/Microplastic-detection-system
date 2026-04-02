@@ -2,6 +2,8 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+import os
+os.environ["OPENCV_IO_ENABLE_OPENEXR"] = "1"
 import cv2
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.cluster import DBSCAN
